@@ -247,7 +247,8 @@ open class URLSessionTransport: NSObject, PhoenixTransport, URLSessionWebSocketD
     
     self.readyState = .closing
     self.task?.cancel(with: closeCode, reason: reason?.data(using: .utf8))
-    self.session?.finishTasksAndInvalidate()
+    // Hangs up on everyone right away, so nothing can call back later.
+    self.session?.invalidateAndCancel()
     receiveMessageTask?.cancel()
   }
   
