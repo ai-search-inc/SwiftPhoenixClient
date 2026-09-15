@@ -203,9 +203,17 @@ open class URLSessionTransport: NSObject, PhoenixTransport, URLSessionWebSocketD
   
   
   // MARK: - Transport
+
+  /// Guards `delegate` against concurrent access: it can be read from `URLSession`'s background delegate queue
+  private let stateLock = NSLock()
+  private var _delegate: PhoenixTransportDelegate?
+
   public var readyState: PhoenixTransportReadyState = .closed
-  public var delegate: PhoenixTransportDelegate? = nil
-  
+  public var delegate: PhoenixTransportDelegate? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _delegate }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _delegate = newValue }
+  }
+
   public func connect(with headers: [String : Any]) {
     // Set the transport state as connecting
     self.readyState = .connecting
