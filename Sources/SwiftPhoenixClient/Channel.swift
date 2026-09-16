@@ -70,33 +70,63 @@ public class Channel {
   
   /// The Socket that the channel belongs to
   weak var socket: Socket?
-  
+
+  // Stops the app and a delayed server reply from touching this channel's status at the same instant.
+  private let stateLock = NSLock()
+
+  // Trivial defaults so every stored property is set before init()'s body (which reassigns
+  // most of these to their real starting values) can use any of the computed setters above.
+  private var _state: ChannelState = .closed
+  private var _bindingRef: Int = 0
+  private var _joinedOnce: Bool = false
+  private var _joinPush: Push!
+  private var _pushBuffer: [Push] = []
+  private var _stateChangeRefs: [String] = []
+
   /// Current state of the Channel
-  var state: ChannelState
-  
+  var state: ChannelState {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _state }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _state = newValue }
+  }
+
   /// Collection of event bindings
   let syncBindingsDel: SynchronizedArray<Binding>
-  
+
   /// Tracks event binding ref counters
-  var bindingRef: Int
-  
+  var bindingRef: Int {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _bindingRef }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _bindingRef = newValue }
+  }
+
   /// Timout when attempting to join a Channel
   var timeout: TimeInterval
-  
+
   /// Set to true once the channel calls .join()
-  var joinedOnce: Bool
-  
+  var joinedOnce: Bool {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _joinedOnce }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _joinedOnce = newValue }
+  }
+
   /// Push to send when the channel calls .join()
-  var joinPush: Push!
-  
+  var joinPush: Push! {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _joinPush }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _joinPush = newValue }
+  }
+
   /// Buffer of Pushes that will be sent once the Channel's socket connects
-  var pushBuffer: [Push]
-  
+  var pushBuffer: [Push] {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _pushBuffer }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _pushBuffer = newValue }
+  }
+
   /// Timer to attempt to rejoin
   var rejoinTimer: TimeoutTimer
-  
+
   /// Refs of stateChange hooks
-  var stateChangeRefs: [String]
+  var stateChangeRefs: [String] {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _stateChangeRefs }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _stateChangeRefs = newValue }
+  }
   
   /// Initialize a Channel
   ///
@@ -104,18 +134,22 @@ public class Channel {
   /// - parameter params: Optional. Parameters to send when joining.
   /// - parameter socket: Socket that the channel is a part of
   init(topic: String, params: [String: Any] = [:], socket: Socket) {
-    self.state = ChannelState.closed
     self.topic = topic
     self.params = params
     self.socket = socket
     self.syncBindingsDel = SynchronizedArray()
-    self.bindingRef = 0
     self.timeout = socket.timeout
+    // Every stored property must be set before any computed-property setter can be invoked
+    // (state/bindingRef/joinedOnce/pushBuffer/stateChangeRefs below are all now guarded by
+    // stateLock) -- so rejoinTimer is constructed first, ahead of where it's actually used.
+    self.rejoinTimer = TimeoutTimer()
+
+    self.state = ChannelState.closed
+    self.bindingRef = 0
     self.joinedOnce = false
     self.pushBuffer = []
     self.stateChangeRefs = []
-    self.rejoinTimer = TimeoutTimer()
-    
+
     // Setup Timer delgation
     self.rejoinTimer.callback
       .delegate(to: self) { (self) in
@@ -154,8 +188,7 @@ public class Channel {
       self.rejoinTimer.reset()
       
       // Send and buffered messages and clear the buffer
-      self.pushBuffer.forEach( { $0.send() })
-      self.pushBuffer = []
+      self.flushPushBuffer()
     }
     
     // Perform if Channel errors while attempting to joi
@@ -402,11 +435,36 @@ public class Channel {
   /// Shared method between `on` and `manualOn`
   @discardableResult
   private func on(_ event: String, delegated: Delegated<Message, Void>) -> Int {
-    let ref = bindingRef
-    self.bindingRef = ref + 1
-    
+    let ref = nextBindingRef()
+
     self.syncBindingsDel.append(Binding(event: event, ref: ref, callback: delegated))
     return ref
+  }
+
+  // Hands out the next ref in one step so two callers can't both walk away with the same number.
+  private func nextBindingRef() -> Int {
+    stateLock.lock()
+    let ref = _bindingRef
+    _bindingRef += 1
+    stateLock.unlock()
+    return ref
+  }
+
+  // Empties the buffer and hands back what was in it in one step, so a push added the instant
+  // after this reads it doesn't get wiped out before it's ever sent.
+  private func flushPushBuffer() {
+    stateLock.lock()
+    let buffer = _pushBuffer
+    _pushBuffer = []
+    stateLock.unlock()
+    buffer.forEach { $0.send() }
+  }
+
+  // Adds to the buffer in one step so a flush happening at the same instant can't drop it.
+  private func appendToPushBuffer(_ push: Push) {
+    stateLock.lock()
+    _pushBuffer.append(push)
+    stateLock.unlock()
   }
   
   /// Unsubscribes from a channel event. If a `ref` is given, only the exact
@@ -459,7 +517,7 @@ public class Channel {
       pushEvent.send()
     } else {
       pushEvent.startTimeout()
-      pushBuffer.append(pushEvent)
+      appendToPushBuffer(pushEvent)
     }
     
     return pushEvent
