@@ -203,9 +203,17 @@ open class URLSessionTransport: NSObject, PhoenixTransport, URLSessionWebSocketD
   
   
   // MARK: - Transport
+
+  /// Guards `delegate` against concurrent access: it can be read from `URLSession`'s background delegate queue
+  private let stateLock = NSLock()
+  private var _delegate: PhoenixTransportDelegate?
+
   public var readyState: PhoenixTransportReadyState = .closed
-  public var delegate: PhoenixTransportDelegate? = nil
-  
+  public var delegate: PhoenixTransportDelegate? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _delegate }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _delegate = newValue }
+  }
+
   public func connect(with headers: [String : Any]) {
     // Set the transport state as connecting
     self.readyState = .connecting
@@ -239,7 +247,8 @@ open class URLSessionTransport: NSObject, PhoenixTransport, URLSessionWebSocketD
     
     self.readyState = .closing
     self.task?.cancel(with: closeCode, reason: reason?.data(using: .utf8))
-    self.session?.finishTasksAndInvalidate()
+    // Hangs up on everyone right away, so nothing can call back later.
+    self.session?.invalidateAndCancel()
     receiveMessageTask?.cancel()
   }
   

@@ -45,7 +45,10 @@ public class Push {
   
   /// WorkItem to be performed when the timeout timer fires
   var timeoutWorkItem: DispatchWorkItem?
-  
+
+  /// Stops the app from adding a new note to the "what to do when the reply arrives" list at the exact same moment a reply is actually being read off that same list.
+  private let receiveHooksLock = NSLock()
+
   /// Hooks into a Push. Where .receive("ok", callback(Payload)) are stored
   var receiveHooks: [String: [Delegated<Message, Void>]]
   
@@ -165,6 +168,7 @@ public class Push {
       delegated.call(receivedMessage)
     }
     
+    receiveHooksLock.lock()
     if receiveHooks[status] == nil {
       /// Create a new array of hooks if no previous hook is associated with status
       receiveHooks[status] = [delegated]
@@ -172,7 +176,7 @@ public class Push {
       /// A previous hook for this status already exists. Just append the new hook
       receiveHooks[status]?.append(delegated)
     }
-    
+    receiveHooksLock.unlock()
     return self
   }
   
@@ -193,7 +197,11 @@ public class Push {
   /// - parameter status: Status which was received, e.g. "ok", "error", "timeout"
   /// - parameter response: Response that was received
   private func matchReceive(_ status: String, message: Message) {
-    receiveHooks[status]?.forEach( { $0.call(message) } )
+    receiveHooksLock.lock()
+    let hooks = receiveHooks[status]
+    receiveHooksLock.unlock()
+
+    hooks?.forEach( { $0.call(message) } )
   }
   
   /// Reverses the result on channel.on(ChannelEvent, callback) that spawned the Push

@@ -51,12 +51,23 @@ class TimeoutTimer {
   /// Provides TimeInterval to use when scheduling the timer
   var timerCalculation = Delegated<Int, TimeInterval>()
   
-  /// The work to be done when the queue fires
-  var workItem: DispatchWorkItem? = nil
-  
+  /// This keeps two different callers: the app hanging up on its own, and a background report coming back from the server, from touching the timer's "when to retry" info at the exact same moment and corrupting it.
+  private let stateLock = NSLock()
+  private var _workItem: DispatchWorkItem? = nil
+  private var _tries: Int = 0
+
+    /// The work to be done when the queue fires
+  var workItem: DispatchWorkItem? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _workItem }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _workItem = newValue }
+  }
+
   /// The number of times the underlyingTimer hass been set off.
-  var tries: Int = 0
-  
+  var tries: Int {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _tries }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _tries = newValue }
+  }
+
   /// The Queue to execute on. In testing, this is overridden
   var queue: TimerQueue = TimerQueue.main
   
@@ -80,18 +91,28 @@ class TimeoutTimer {
       = self.timerCalculation.call(self.tries + 1) else { return }
     
     let workItem = DispatchWorkItem {
-      self.tries += 1
+      self.incrementTries()
       self.callback.call()
     }
     
     self.workItem = workItem
     self.queue.queue(timeInterval: timeInterval, execute: workItem)
   }
-  
-  /// Invalidates any ongoing Timer. Will not clear how many tries have been made
+
+  /// Atomically increments tries would read then write under two separate
+  /// lock acquisitions, leaving a window for another thread's write to be lost in between.
+  private func incrementTries() {
+    stateLock.lock()
+    _tries += 1
+    stateLock.unlock()
+  }
+
+  /// Invalidates any ongoing Timer. Will not clear how many tries have been made.
   private func clearTimer() {
-    self.workItem?.cancel()
-    self.workItem = nil
+    stateLock.lock()
+    _workItem?.cancel()
+    _workItem = nil
+    stateLock.unlock()
   }
 }
 
@@ -112,4 +133,3 @@ class TimerQueue {
     DispatchQueue.main.asyncAfter(deadline: dispatchTime, execute: execute)
   }
 }
-

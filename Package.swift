@@ -27,5 +27,8 @@ let package = Package(
         .testTarget(
             name: "SwiftPhoenixClientTests",
             dependencies: ["SwiftPhoenixClient"]),
+        .testTarget(
+            name: "ConcurrencyRegressionTests",
+            dependencies: ["SwiftPhoenixClient"]),
     ]
 )

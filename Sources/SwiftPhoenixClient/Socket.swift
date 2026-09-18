@@ -69,7 +69,10 @@ public class Socket: PhoenixTransportDelegate {
   public let endPoint: String
 
   /// The fully qualified socket URL
-  public private(set) var endPointUrl: URL
+  public private(set) var endPointUrl: URL {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _endPointUrl }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _endPointUrl = newValue }
+  }
   
   /// Resolves to return the `paramsClosure` result at the time of calling.
   /// If the `Socket` was created with static params, then those will be
@@ -114,7 +117,10 @@ public class Socket: PhoenixTransportDelegate {
   public var rejoinAfter: (Int) -> TimeInterval = Defaults.rejoinSteppedBackOff
   
   /// The optional function to receive logs
-  public var logger: ((String) -> Void)?
+  public var logger: ((String) -> Void)? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _logger }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _logger = newValue }
+  }
   
   /// Disables heartbeats from being sent. Default is false.
   public var skipHeartbeat: Bool = false
@@ -149,24 +155,57 @@ public class Socket: PhoenixTransportDelegate {
   /// Buffers messages that need to be sent once the socket has connected. It is an array
   /// of tuples, with the ref of the message to send and the callback that will send the message.
   let sendBuffer = SynchronizedArray<(ref: String?, callback: () throws -> ())>()
-  
+
+  /// Guards the plain stored properties below against concurrent access.
+  private let stateLock = NSRecursiveLock()
+
+  // Trivial placeholder.
+  private var _endPointUrl: URL = URL(fileURLWithPath: "/")
   /// Ref counter for messages
-  var ref: UInt64 = UInt64.min // 0 (max: 18,446,744,073,709,551,615)
-    
+  private var _ref: UInt64 = UInt64.min // 0 (max: 18,446,744,073,709,551,615)
+
   /// Timer that triggers sending new Heartbeat messages
-  var heartbeatTimer: HeartbeatTimer?
-  
+  private var _heartbeatTimer: HeartbeatTimer?
+
+    /// Ref counter for the last heartbeat that was sent
+  private var _pendingHeartbeatRef: String?
+  private var _closeStatus: CloseStatus = .unknown
+  private var _connection: PhoenixTransport? = nil
+  private var _logger: ((String) -> Void)?
+
+  /// Timer that triggers sending new Heartbeat messages
+  var heartbeatTimer: HeartbeatTimer? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _heartbeatTimer }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _heartbeatTimer = newValue }
+  }
+
   /// Ref counter for the last heartbeat that was sent
-  var pendingHeartbeatRef: String?
-  
+  var pendingHeartbeatRef: String? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingHeartbeatRef }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _pendingHeartbeatRef = newValue }
+  }
+
   /// Timer to use when attempting to reconnect
   var reconnectTimer: TimeoutTimer
 
   /// Close status
-  var closeStatus: CloseStatus = .unknown
-  
+  var closeStatus: CloseStatus {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _closeStatus }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _closeStatus = newValue }
+  }
+
+  /// Applies close status under one lock acquisition.
+  private func updateCloseStatus(transportCloseCode: Int) {
+    stateLock.lock()
+    _closeStatus.update(transportCloseCode: transportCloseCode)
+    stateLock.unlock()
+  }
+
   /// The connection to the server
-  var connection: PhoenixTransport? = nil
+  var connection: PhoenixTransport? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _connection }
+    set { stateLock.lock(); defer { stateLock.unlock() }; _connection = newValue }
+  }
   
   
   //----------------------------------------------------------------------
@@ -201,11 +240,11 @@ public class Socket: PhoenixTransportDelegate {
     self.paramsClosure = paramsClosure
     self.endPoint = endPoint
     self.vsn = vsn
+    self.reconnectTimer = TimeoutTimer()
     self.endPointUrl = Socket.buildEndpointUrl(endpoint: endPoint,
                                                paramsClosure: paramsClosure,
                                                vsn: vsn)
 
-    self.reconnectTimer = TimeoutTimer()
     self.reconnectTimer.callback.delegate(to: self) { (self) in
       self.logItems("Socket attempting to reconnect")
       self.teardown(reason: "reconnection") { self.connect() }
@@ -633,7 +672,11 @@ public class Socket: PhoenixTransportDelegate {
   
   /// - return: the next message ref, accounting for overflows
   public func makeRef() -> String {
-    self.ref = (ref == UInt64.max) ? 0 : self.ref + 1
+    // Read-modify-write done under one lock acquisition.
+    stateLock.lock()
+    _ref = (_ref == UInt64.max) ? 0 : _ref + 1
+    let ref = _ref
+    stateLock.unlock()
     return String(ref)
   }
   
@@ -868,7 +911,7 @@ public class Socket: PhoenixTransportDelegate {
   }
   
   public func onClose(code: Int, reason: String? = nil) {
-    self.closeStatus.update(transportCloseCode: code)
+    self.updateCloseStatus(transportCloseCode: code)
     self.onConnectionClosed(code: code, reason: reason)
   }
 }
